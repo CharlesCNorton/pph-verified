@@ -202,9 +202,10 @@ Definition surveillance_threshold_cesarean_mL : CitedValue := MkCited 1000 src_A
 Definition txa_window_min : CitedValue := MkCited 180 src_WOMAN2017.
 
 (** Shock index thresholds per Nathan et al. BJOG 2015:
-    General: >0.9, Obstetric-specific: >1.0. *)
+    General: >0.9, Obstetric-specific: >1.0, Severe: >1.4. *)
 Definition shock_index_general_x10 : CitedValue := MkCited 9 src_Nathan2015.
 Definition shock_index_obstetric_x10 : CitedValue := MkCited 10 src_Nathan2015.
+Definition shock_index_severe_x10 : CitedValue := MkCited 14 src_Nathan2015.
 
 (** EBL correction factor per Bose et al. BJOG 2006:
     Visual estimation underestimates by 30-50%; multiply by 1.4. *)
@@ -228,6 +229,10 @@ Definition hypothermia_severe_x10 : CitedValue := MkCited 320 src_ATLS10.
 Definition class2_pct : CitedValue := MkCited 15 src_ATLS10.
 Definition class3_pct : CitedValue := MkCited 30 src_ATLS10.
 Definition class4_pct : CitedValue := MkCited 40 src_ATLS10.
+
+(** Rate of blood loss thresholds (mL/min) - institutional parameter. *)
+Definition rate_rapid_mL_per_min : nat := 150.
+Definition rate_very_rapid_mL_per_min : nat := 300.
 
 Definition vaginal_stage2 : nat := value vaginal_stage2_mL.
 Definition vaginal_stage3 : nat := value vaginal_stage3_mL.
@@ -362,7 +367,7 @@ Proof.
   intros amt. unfold corrected_blood_loss. simpl.
   assert (H: amt * 100 <= amt * 140) by lia.
   assert (H2: amt * 100 / 100 <= amt * 140 / 100).
-  { apply Nat.div_le_mono; lia. }
+  { apply Nat.Div0.div_le_mono; lia. }
   rewrite Nat.div_mul in H2 by lia. exact H2.
 Qed.
 
@@ -376,7 +381,7 @@ Proof.
   change (bl_method (MkBloodLoss amt Estimated)) with Estimated.
   change (bl_amount_mL (MkBloodLoss amt Estimated)) with amt.
   transitivity (amt * 2 * 100 / 100).
-  - apply Nat.div_le_mono. lia. lia.
+  - apply Nat.Div0.div_le_mono; lia.
   - rewrite Nat.div_mul by lia. lia.
 Qed.
 
@@ -1356,9 +1361,13 @@ Definition is_tachypneic (v : t) : bool := 24 <=? respiratory_rate v.
     2. Pregnancy decreases baseline SBP by 5-10 mmHg
     3. SI > 0.9 has 18% false positive rate in obstetric patients
     Reference: Nathan HL et al. BJOG 2015;122:268-275 *)
-Definition shock_index_threshold_general_x10 : nat := 9.
-Definition shock_index_threshold_obstetric_x10 : nat := 10.
-Definition shock_index_threshold_severe_x10 : nat := 14.
+(** Reference ClinicalParameters for single source of truth. *)
+Definition shock_index_threshold_general_x10 : nat :=
+  ClinicalParameters.value ClinicalParameters.shock_index_general_x10.
+Definition shock_index_threshold_obstetric_x10 : nat :=
+  ClinicalParameters.value ClinicalParameters.shock_index_obstetric_x10.
+Definition shock_index_threshold_severe_x10 : nat :=
+  ClinicalParameters.value ClinicalParameters.shock_index_severe_x10.
 
 Definition shock_index_elevated (v : t) : bool :=
   shock_index_threshold_general_x10 <=? shock_index_x10 v.
@@ -1373,14 +1382,17 @@ Definition shock_index_severely_elevated (v : t) : bool :=
     Uses obstetric-specific threshold (1.0) which is more specific. *)
 Definition obstetric_shock_class (v : t) : nat :=
   let si := shock_index_x10 v in
-  if 14 <=? si then 3
-  else if 10 <=? si then 2
+  if shock_index_threshold_severe_x10 <=? si then 3
+  else if shock_index_threshold_obstetric_x10 <=? si then 2
   else if 7 <=? si then 1
   else 0.
 
 Lemma obstetric_shock_class_range : forall v, obstetric_shock_class v <= 3.
 Proof.
-  intros v. unfold obstetric_shock_class.
+  intros v. unfold obstetric_shock_class, shock_index_threshold_severe_x10,
+    shock_index_threshold_obstetric_x10,
+    ClinicalParameters.shock_index_severe_x10, ClinicalParameters.shock_index_obstetric_x10,
+    ClinicalParameters.value.
   destruct (14 <=? shock_index_x10 v); [lia|].
   destruct (10 <=? shock_index_x10 v); [lia|].
   destruct (7 <=? shock_index_x10 v); lia.
@@ -1389,13 +1401,19 @@ Qed.
 (** Relationship between thresholds *)
 Lemma obstetric_threshold_higher_than_general :
   shock_index_threshold_general_x10 < shock_index_threshold_obstetric_x10.
-Proof. unfold shock_index_threshold_general_x10, shock_index_threshold_obstetric_x10. lia. Qed.
+Proof.
+  unfold shock_index_threshold_general_x10, shock_index_threshold_obstetric_x10,
+    ClinicalParameters.shock_index_general_x10, ClinicalParameters.shock_index_obstetric_x10,
+    ClinicalParameters.value. lia.
+Qed.
 
 Lemma severe_si_implies_obstetric_elevated : forall v,
   shock_index_severely_elevated v = true -> shock_index_elevated_obstetric v = true.
 Proof.
   intros v H. unfold shock_index_severely_elevated, shock_index_elevated_obstetric in *.
-  unfold shock_index_threshold_severe_x10, shock_index_threshold_obstetric_x10 in *.
+  unfold shock_index_threshold_severe_x10, shock_index_threshold_obstetric_x10,
+    ClinicalParameters.shock_index_severe_x10, ClinicalParameters.shock_index_obstetric_x10,
+    ClinicalParameters.value in *.
   apply Nat.leb_le in H. apply Nat.leb_le. lia.
 Qed.
 
@@ -2085,7 +2103,7 @@ Lemma high_risk_lowers_threshold : forall p base,
   is_high_risk p = true -> adjusted_stage2_threshold p base <= base.
 Proof.
   intros p base H. unfold adjusted_stage2_threshold. rewrite H.
-  assert (base / 5 <= base) by (apply Nat.div_le_upper_bound; lia).
+  assert (base / 5 <= base) by (apply Nat.Div0.div_le_upper_bound; lia).
   lia.
 Qed.
 
@@ -2847,9 +2865,12 @@ Module RateOfLoss.
 
 Definition mL_per_minute := nat.
 
-Definition is_rapid (rate : mL_per_minute) : bool := 150 <=? rate.
+(** Reference ClinicalParameters for single source of truth. *)
+Definition is_rapid (rate : mL_per_minute) : bool :=
+  ClinicalParameters.rate_rapid_mL_per_min <=? rate.
 
-Definition is_very_rapid (rate : mL_per_minute) : bool := 300 <=? rate.
+Definition is_very_rapid (rate : mL_per_minute) : bool :=
+  ClinicalParameters.rate_very_rapid_mL_per_min <=? rate.
 
 Definition projected_loss_in_minutes (rate : mL_per_minute) (minutes : nat) : nat :=
   rate * minutes.
@@ -4534,7 +4555,7 @@ Lemma compliance_percent_stage1_max : forall c, compliance_percent_stage1 c <= 1
 Proof.
   intros c. unfold compliance_percent_stage1.
   pose proof (compliance_score_stage1_max c) as H.
-  apply Nat.div_le_upper_bound; lia.
+  apply Nat.Div0.div_le_upper_bound; lia.
 Qed.
 
 End Checklist.
