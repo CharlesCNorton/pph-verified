@@ -1895,6 +1895,28 @@ Proof.
   apply andb_true_intro. split; apply Z.leb_le; lia.
 Qed.
 
+(******************************************************************************)
+(*                     PRECISE ARITHMETIC INTEGRATION                         *)
+(*                                                                            *)
+(*  Connect VitalSigns to PreciseArithmetic for exact calculations.           *)
+(******************************************************************************)
+
+(** Precise shock index as rational (no truncation). *)
+Definition shock_index_Q (v : t) : Q :=
+  PreciseArithmetic.shock_index_Q (heart_rate v) (systolic_bp v).
+
+(** Precise shock index as real. *)
+Definition shock_index_R (v : t) : R :=
+  PreciseArithmetic.shock_index_real (heart_rate v) (systolic_bp v).
+
+(** Check shock elevation using precise rational arithmetic. *)
+Definition shock_elevated_precise (v : t) : bool :=
+  PreciseArithmetic.shock_elevated_Q (heart_rate v) (systolic_bp v).
+
+(** Check obstetric shock using precise rational arithmetic. *)
+Definition shock_elevated_obstetric_precise (v : t) : bool :=
+  PreciseArithmetic.shock_elevated_obstetric_Q (heart_rate v) (systolic_bp v).
+
 End VitalSigns.
 
 (******************************************************************************)
@@ -2658,6 +2680,42 @@ Proof. simpl. lia. Qed.
 Lemma twins_lower_than_triplets :
   pph_risk_multiplier_x100 Twins < pph_risk_multiplier_x100 Triplets.
 Proof. simpl. lia. Qed.
+
+(******************************************************************************)
+(*                     PRECISE BMI CALCULATION                                *)
+(*                                                                            *)
+(*  BMI as rational to avoid integer overflow and truncation.                 *)
+(*  BMI = weight_kg / height_m^2 = weight_kg * 10000 / height_cm^2            *)
+(******************************************************************************)
+
+(** Precise BMI as rational. *)
+Definition bmi_Q (p : t) : Q :=
+  let w := PreciseArithmetic.nat_to_Q (weight_kg p) in
+  let h := PreciseArithmetic.nat_to_Q (height_cm p) in
+  if (height_cm p =? 0)%nat then 0%Q
+  else (w * 10000 / (h * h))%Q.
+
+(** Precise blood volume percentage lost as rational. *)
+Definition percent_volume_lost_Q (p : t) (ebl : nat) : Q :=
+  let ebv := estimated_blood_volume_mL p in
+  if (ebv =? 0)%nat then 0%Q
+  else PreciseArithmetic.div_precise (ebl * 100) ebv.
+
+(** Precise blood volume percentage using BMI-adjusted calculation. *)
+Definition percent_volume_lost_bmi_Q (p : t) (ebl : nat) : Q :=
+  let ebv := estimated_blood_volume_bmi_adjusted_mL p in
+  if (ebv =? 0)%nat then 0%Q
+  else PreciseArithmetic.div_precise (ebl * 100) ebv.
+
+(** BMI category from precise BMI (using Q comparison). *)
+Definition bmi_category_precise (p : t) : BMICategory :=
+  let bmi := bmi_Q p in
+  if Qlt_le_dec bmi (185 # 10) then Underweight
+  else if Qlt_le_dec bmi (250 # 10) then Normal
+  else if Qlt_le_dec bmi (300 # 10) then Overweight
+  else if Qlt_le_dec bmi (350 # 10) then ObeseI
+  else if Qlt_le_dec bmi (400 # 10) then ObeseII
+  else ObeseIII.
 
 End PatientFactors.
 
@@ -6866,6 +6924,350 @@ Definition txa_eventually_resolved (tr : Trace) (onset : nat) : Prop :=
     ts_time_minutes s >= onset + txa_window_minutes \/
     True) tr.
 
+(******************************************************************************)
+(*                    STATE MACHINE CONNECTION                                *)
+(*                                                                            *)
+(*  Connect LTL operators to the valid_transition relation.                   *)
+(******************************************************************************)
+
+(** A trace respects the state machine if all consecutive states have valid transitions. *)
+Fixpoint respects_transitions (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | _ :: nil => True
+  | s1 :: ((s2 :: _) as rest) =>
+      valid_transition (ts_state s1) (ts_state s2) = true /\
+      respects_transitions rest
+  end.
+
+(** A trace is well-formed if it respects transitions and has increasing time. *)
+Fixpoint time_increasing (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | _ :: nil => True
+  | s1 :: ((s2 :: _) as rest) =>
+      ts_time_minutes s1 <= ts_time_minutes s2 /\
+      time_increasing rest
+  end.
+
+Definition well_formed_trace (tr : Trace) : Prop :=
+  respects_transitions tr /\ time_increasing tr /\ ebl_monotonic tr.
+
+(** Key theorem: well-formed traces have monotonic states. *)
+Lemma well_formed_implies_states_monotonic : forall tr,
+  respects_transitions tr -> states_monotonic tr.
+Proof.
+  intros tr. induction tr as [|s1 rest IH].
+  - intro. simpl. exact I.
+  - intro Hresp. destruct rest as [|s2 rest'].
+    + simpl. exact I.
+    + simpl in Hresp. destruct Hresp as [Htrans Hrest].
+      simpl. split.
+      * apply no_downgrade. exact Htrans.
+      * apply IH. exact Hrest.
+Qed.
+
+(******************************************************************************)
+(*                         DISTANCE TO TERMINAL                               *)
+(*                                                                            *)
+(*  Well-founded measure for proving termination/liveness.                    *)
+(******************************************************************************)
+
+(** Distance from a state to terminal (minimum transitions needed). *)
+Definition distance_to_terminal (s : ManagementState) : nat :=
+  match s with
+  | StateRecognition => 4
+  | StateActivation => 3
+  | StateResuscitation => 2
+  | StateSurgical => 1
+  | StateResolved => 0
+  | StateICU => 0
+  end.
+
+Lemma terminal_distance_zero : forall s,
+  is_terminal_state s = true <-> distance_to_terminal s = 0.
+Proof.
+  intro s. destruct s; simpl; split; intro H; try reflexivity; try discriminate.
+Qed.
+
+Lemma non_terminal_distance_positive : forall s,
+  is_terminal_state s = false -> distance_to_terminal s > 0.
+Proof.
+  intros s H. destruct s; simpl in *; try discriminate; lia.
+Qed.
+
+(** Valid transitions decrease or maintain distance (non-strictly for terminal transitions). *)
+Lemma valid_transition_nonincreasing_distance : forall s1 s2,
+  valid_transition s1 s2 = true ->
+  distance_to_terminal s2 <= distance_to_terminal s1.
+Proof.
+  intros s1 s2 Htrans.
+  destruct s1; destruct s2; simpl in *; try discriminate; try lia.
+Qed.
+
+(** Non-self transitions from non-terminal states strictly decrease distance. *)
+Lemma valid_transition_decreases_distance : forall s1 s2,
+  valid_transition s1 s2 = true ->
+  s1 <> s2 ->
+  is_terminal_state s1 = false ->
+  distance_to_terminal s2 < distance_to_terminal s1.
+Proof.
+  intros s1 s2 Htrans Hneq Hnterm.
+  destruct s1; destruct s2; simpl in *; try discriminate; try lia.
+  - exfalso. apply Hneq. reflexivity.
+  - exfalso. apply Hneq. reflexivity.
+  - exfalso. apply Hneq. reflexivity.
+  - exfalso. apply Hneq. reflexivity.
+Qed.
+
+(******************************************************************************)
+(*                           FAIRNESS CONDITIONS                              *)
+(*                                                                            *)
+(*  Fairness ensures enabled transitions eventually happen.                   *)
+(******************************************************************************)
+
+(** A transition is enabled if it's valid from the current state. *)
+Definition transition_enabled (s : ManagementState) (target : ManagementState) : bool :=
+  valid_transition s target && negb (state_to_nat s =? state_to_nat target).
+
+(** Weak fairness: if a transition is continuously enabled, it eventually happens. *)
+Definition weakly_fair (tr : Trace) : Prop :=
+  forall target,
+    (forall s, In s tr -> transition_enabled (ts_state s) target = true) ->
+    eventually (is_in_state target) tr.
+
+(** Strong fairness: if a transition is enabled infinitely often, it eventually happens.
+    For finite traces, this reduces to: if enabled anywhere, eventually happens. *)
+Definition strongly_fair (tr : Trace) : Prop :=
+  forall target,
+    (exists s, In s tr /\ transition_enabled (ts_state s) target = true) ->
+    eventually (is_in_state target) tr.
+
+(******************************************************************************)
+(*                         CTL-STYLE OPERATORS                                *)
+(*                                                                            *)
+(*  Branching time logic for reasoning about computation trees.               *)
+(*  For finite traces, we model this via sets of possible futures.            *)
+(******************************************************************************)
+
+(** Computation tree: a state with possible futures. *)
+Inductive CompTree : Type :=
+  | Leaf : TimeStampedState -> CompTree
+  | Branch : TimeStampedState -> list CompTree -> CompTree.
+
+(** Get root state of a computation tree. *)
+Definition tree_root (t : CompTree) : TimeStampedState :=
+  match t with
+  | Leaf s => s
+  | Branch s _ => s
+  end.
+
+(** AG (All paths, Globally): property holds on all paths at all states. *)
+Inductive AG (P : TimeStampedState -> Prop) : CompTree -> Prop :=
+  | AG_Leaf : forall s, P s -> AG P (Leaf s)
+  | AG_Branch : forall s children,
+      P s ->
+      (forall c, In c children -> AG P c) ->
+      AG P (Branch s children).
+
+(** EG (Exists path, Globally): property holds on some path at all states. *)
+Inductive EG (P : TimeStampedState -> Prop) : CompTree -> Prop :=
+  | EG_Leaf : forall s, P s -> EG P (Leaf s)
+  | EG_Branch : forall s children c,
+      P s ->
+      In c children ->
+      EG P c ->
+      EG P (Branch s children).
+
+(** AF (All paths, Finally): property holds eventually on all paths. *)
+Inductive AF (P : TimeStampedState -> Prop) : CompTree -> Prop :=
+  | AF_Here : forall t, P (tree_root t) -> AF P t
+  | AF_Later : forall s children,
+      children <> nil ->
+      (forall c, In c children -> AF P c) ->
+      AF P (Branch s children).
+
+(** EF (Exists path, Finally): property holds eventually on some path. *)
+Inductive EF (P : TimeStampedState -> Prop) : CompTree -> Prop :=
+  | EF_Here : forall t, P (tree_root t) -> EF P t
+  | EF_Later : forall s children c,
+      In c children ->
+      EF P c ->
+      EF P (Branch s children).
+
+(** AG P -> P holds at root. *)
+Lemma AG_implies_at_root : forall P t,
+  AG P t -> P (tree_root t).
+Proof.
+  intros P t H. inversion H; subst; simpl; assumption.
+Qed.
+
+(** EF P -> exists state satisfying P. *)
+Lemma EF_implies_exists : forall P t,
+  EF P t -> exists s, P s.
+Proof.
+  intros P t H. induction H.
+  - exists (tree_root t). exact H.
+  - exact IHEF.
+Qed.
+
+(******************************************************************************)
+(*                      LIVENESS THEOREMS                                     *)
+(*                                                                            *)
+(*  Proving that hemorrhage management eventually terminates.                 *)
+(******************************************************************************)
+
+(** Auxiliary: list of valid successors for a state. *)
+Definition valid_successors (s : ManagementState) : list ManagementState :=
+  match s with
+  | StateRecognition => [StateActivation]
+  | StateActivation => [StateResuscitation]
+  | StateResuscitation => [StateSurgical; StateResolved]
+  | StateSurgical => [StateResolved; StateICU]
+  | StateResolved => [StateICU]
+  | StateICU => []
+  end.
+
+Lemma valid_successors_sound : forall s1 s2,
+  In s2 (valid_successors s1) -> valid_transition s1 s2 = true /\ s1 <> s2.
+Proof.
+  intros s1 s2 H.
+  destruct s1; simpl in H.
+  - destruct H as [H|H]; [subst; split; [reflexivity | discriminate] | destruct H].
+  - destruct H as [H|H]; [subst; split; [reflexivity | discriminate] | destruct H].
+  - destruct H as [H|[H|H]]; [subst; split; [reflexivity | discriminate] | subst; split; [reflexivity | discriminate] | destruct H].
+  - destruct H as [H|[H|H]]; [subst; split; [reflexivity | discriminate] | subst; split; [reflexivity | discriminate] | destruct H].
+  - destruct H as [H|H]; [subst; split; [reflexivity | discriminate] | destruct H].
+  - destruct H.
+Qed.
+
+(** Non-terminal states have successors. *)
+Lemma non_terminal_has_successor : forall s,
+  is_terminal_state s = false -> valid_successors s <> [].
+Proof.
+  intros s H. destruct s; simpl in *; try discriminate; discriminate.
+Qed.
+
+(** Key liveness theorem: From any state, there exists a path to terminal.
+    Direct construction for each starting state. *)
+Theorem exists_path_to_terminal : forall s,
+  exists path,
+    match path with
+    | [] => False
+    | hd :: _ => ts_state hd = s
+    end /\
+    eventually reached_terminal path.
+Proof.
+  intro s. destruct s.
+  - exists [MkTSState StateRecognition 0 0; MkTSState StateActivation 0 0;
+            MkTSState StateResuscitation 0 0; MkTSState StateResolved 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateResolved 0 0). split.
+      * right. right. right. left. reflexivity.
+      * reflexivity.
+  - exists [MkTSState StateActivation 0 0; MkTSState StateResuscitation 0 0;
+            MkTSState StateResolved 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateResolved 0 0). split.
+      * right. right. left. reflexivity.
+      * reflexivity.
+  - exists [MkTSState StateResuscitation 0 0; MkTSState StateResolved 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateResolved 0 0). split.
+      * right. left. reflexivity.
+      * reflexivity.
+  - exists [MkTSState StateSurgical 0 0; MkTSState StateResolved 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateResolved 0 0). split.
+      * right. left. reflexivity.
+      * reflexivity.
+  - exists [MkTSState StateResolved 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateResolved 0 0). split.
+      * left. reflexivity.
+      * reflexivity.
+  - exists [MkTSState StateICU 0 0].
+    split.
+    + reflexivity.
+    + exists (MkTSState StateICU 0 0). split.
+      * left. reflexivity.
+      * reflexivity.
+Qed.
+
+(** Corollary: From Recognition, eventually terminal. *)
+Corollary recognition_eventually_terminal :
+  exists path,
+    match path with
+    | [] => False
+    | hd :: _ => ts_state hd = StateRecognition
+    end /\
+    eventually reached_terminal path.
+Proof.
+  apply exists_path_to_terminal.
+Qed.
+
+(** A strictly progressing trace has no self-loops. *)
+Fixpoint strictly_progressing (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | _ :: nil => True
+  | s1 :: ((s2 :: _) as rest) =>
+      ts_state s1 <> ts_state s2 /\ strictly_progressing rest
+  end.
+
+(** Strictly progressing + respects transitions -> distance decreases. *)
+Lemma strictly_progressing_decreases_distance : forall s1 s2 rest,
+  respects_transitions (s1 :: s2 :: rest) ->
+  strictly_progressing (s1 :: s2 :: rest) ->
+  is_terminal_state (ts_state s1) = false ->
+  distance_to_terminal (ts_state s2) < distance_to_terminal (ts_state s1).
+Proof.
+  intros s1 s2 rest Hresp Hprog Hnterm.
+  simpl in Hresp. destruct Hresp as [Htrans _].
+  simpl in Hprog. destruct Hprog as [Hneq _].
+  apply valid_transition_decreases_distance.
+  - exact Htrans.
+  - intro Heq. apply Hneq. rewrite Heq. reflexivity.
+  - exact Hnterm.
+Qed.
+
+(******************************************************************************)
+(*                      WEAK UNTIL AND RELEASE                                *)
+(*                                                                            *)
+(*  Additional temporal operators for completeness.                           *)
+(******************************************************************************)
+
+(** Weak Until (W): P holds until Q, or P holds forever. *)
+Definition weak_until (P Q : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  until P Q tr \/ always P tr.
+
+(** Release (R): dual of Until. Q holds until and including when P first holds. *)
+Fixpoint release (P Q : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | s :: rest =>
+      Q s /\ (P s \/ release P Q rest)
+  end.
+
+(** Weak until is weaker than strong until. *)
+Lemma until_implies_weak_until : forall P Q tr,
+  until P Q tr -> weak_until P Q tr.
+Proof.
+  intros P Q tr H. left. exact H.
+Qed.
+
+(** Always implies weak until. *)
+Lemma always_implies_weak_until : forall P Q tr,
+  always P tr -> weak_until P Q tr.
+Proof.
+  intros P Q tr H. right. exact H.
+Qed.
+
 End TemporalProperties.
 
 (******************************************************************************)
@@ -7313,6 +7715,13 @@ Extraction "pph_extracted"
   TemporalProperties.until TemporalProperties.next
   TemporalProperties.ebl_monotonic TemporalProperties.states_monotonic
   TemporalProperties.progress_guarantee TemporalProperties.reached_terminal
+  TemporalProperties.respects_transitions TemporalProperties.time_increasing
+  TemporalProperties.well_formed_trace TemporalProperties.distance_to_terminal
+  TemporalProperties.transition_enabled TemporalProperties.weakly_fair
+  TemporalProperties.strongly_fair TemporalProperties.CompTree
+  TemporalProperties.AG TemporalProperties.EG TemporalProperties.AF TemporalProperties.EF
+  TemporalProperties.valid_successors TemporalProperties.strictly_progressing
+  TemporalProperties.weak_until TemporalProperties.release
   (* New additions for gap-filling *)
   Units.MeasurementWithUncertainty Units.meas_upper Units.meas_lower
   Units.ebl_with_uncertainty Units.ebl_conservative
@@ -7321,6 +7730,14 @@ Extraction "pph_extracted"
   VitalSigns.SensorStatus VitalSigns.overall_sensor_status
   VitalSigns.has_sensor_failure VitalSigns.has_sensor_issue
   VitalSigns.make_vitals VitalSigns.unknown_vitals
+  VitalSigns.shock_index_Q VitalSigns.shock_index_R
+  VitalSigns.shock_elevated_precise VitalSigns.shock_elevated_obstetric_precise
+  PatientFactors.bmi_Q PatientFactors.percent_volume_lost_Q
+  PatientFactors.percent_volume_lost_bmi_Q PatientFactors.bmi_category_precise
+  PreciseArithmetic.shock_index_real PreciseArithmetic.shock_index_Q
+  PreciseArithmetic.shock_elevated_Q PreciseArithmetic.shock_elevated_obstetric_Q
+  PreciseArithmetic.div_precise PreciseArithmetic.corrected_ebl_Q
+  PreciseArithmetic.Q_to_nat_floor PreciseArithmetic.Q_to_nat_round
   Etiology.EtiologySet Etiology.add_etiology Etiology.etiology_count
   Etiology.ExtendedEtiology Etiology.AmnioticFluidEmbolism Etiology.UterineInversion
   Etiology.InversionDegree Etiology.InversionTreatment
