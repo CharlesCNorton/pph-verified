@@ -174,8 +174,10 @@ Definition src_Nathan2015 : nat := 4.
 Definition src_Bose2006 : nat := 5.
 Definition src_ATLS10 : nat := 6.
 
-(** Staging thresholds per California Maternal Quality Care Collaborative
-    OB Hemorrhage Toolkit v2.0 (2015), Table 1. *)
+(** EBL thresholds adapted from CMQCC OB Hemorrhage Toolkit v2.0 (2015).
+    NOTE: These are EBL-only thresholds. CMQCC staging also requires
+    "continued bleeding" and/or vital sign criteria - see CMQCCStage module.
+    CMQCC uses Stage 0-3; this model uses Stage 1-4 (shifted numbering). *)
 Definition vaginal_stage2_mL : CitedValue := MkCited 500 src_CMQCC2015.
 Definition vaginal_stage3_mL : CitedValue := MkCited 1000 src_CMQCC2015.
 Definition vaginal_stage4_mL : CitedValue := MkCited 1500 src_CMQCC2015.
@@ -183,10 +185,17 @@ Definition cesarean_stage2_mL : CitedValue := MkCited 1000 src_CMQCC2015.
 Definition cesarean_stage3_mL : CitedValue := MkCited 1500 src_CMQCC2015.
 Definition cesarean_stage4_mL : CitedValue := MkCited 2000 src_CMQCC2015.
 
-(** PPH definition per ACOG Practice Bulletin 183 (2017):
-    >=500mL vaginal, >=1000mL cesarean. *)
-Definition pph_threshold_vaginal_mL : CitedValue := MkCited 500 src_ACOG2017.
-Definition pph_threshold_cesarean_mL : CitedValue := MkCited 1000 src_ACOG2017.
+(** ACOG reVITALize PPH Definition per Practice Bulletin 183 (2017):
+    >=1000mL cumulative blood loss OR blood loss with signs/symptoms of
+    hypovolemia within 24 hours of birth, REGARDLESS of delivery route.
+    Note: 500mL vaginal / 1000mL cesarean are surveillance/alert thresholds,
+    not the formal ACOG PPH definition. *)
+Definition pph_acog_threshold_mL : CitedValue := MkCited 1000 src_ACOG2017.
+
+(** Surveillance thresholds for early intervention (NOT the ACOG PPH definition):
+    These trigger heightened monitoring and early intervention. *)
+Definition surveillance_threshold_vaginal_mL : CitedValue := MkCited 500 src_ACOG2017.
+Definition surveillance_threshold_cesarean_mL : CitedValue := MkCited 1000 src_ACOG2017.
 
 (** TXA window per WOMAN trial (Lancet 2017):
     Administer within 3 hours of hemorrhage onset. *)
@@ -878,8 +887,9 @@ End PreciseArithmetic.
 (*                                                                            *)
 (*                          DELIVERY MODE                                     *)
 (*                                                                            *)
-(*  PPH thresholds differ between vaginal and cesarean delivery per ACOG.    *)
-(*  Vaginal: 500 mL defines PPH. Cesarean: 1000 mL defines PPH.              *)
+(*  ACOG reVITALize PPH Definition (PB183, 2017):                             *)
+(*    >=1000mL cumulative OR hypovolemia signs, regardless of delivery route. *)
+(*  Surveillance thresholds: 500mL vaginal / 1000mL cesarean.                 *)
 (*                                                                            *)
 (******************************************************************************)
 
@@ -892,17 +902,40 @@ Inductive t : Type :=
 Definition eq_dec : forall d1 d2 : t, {d1 = d2} + {d1 <> d2}.
 Proof. intros [] []; (left; reflexivity) || (right; discriminate). Defined.
 
-Definition pph_threshold (d : t) : nat :=
+(** ACOG reVITALize PPH Definition (PB183, 2017):
+    >=1000mL cumulative blood loss OR hypovolemia signs, regardless of route.
+    This is the formal PPH definition. *)
+Definition acog_pph_threshold : nat := 1000.
+
+(** PPH by ACOG reVITALize: EBL-only criterion (hypovolemia checked separately). *)
+Definition is_pph_acog_ebl (ebl : nat) : bool := acog_pph_threshold <=? ebl.
+
+(** PPH by ACOG reVITALize: full definition including hypovolemia signs. *)
+Definition is_pph_acog (ebl : nat) (has_hypovolemia_signs : bool) : bool :=
+  is_pph_acog_ebl ebl || has_hypovolemia_signs.
+
+(** Surveillance thresholds for early intervention (NOT the ACOG PPH definition).
+    Reference ClinicalParameters for single source of truth. *)
+Definition surveillance_threshold (d : t) : nat :=
   match d with
-  | Vaginal => 500
-  | Cesarean => 1000
+  | Vaginal => ClinicalParameters.vaginal_stage2
+  | Cesarean => ClinicalParameters.cesarean_stage2
   end.
+
+(** Legacy alias for backward compatibility - prefer surveillance_threshold. *)
+Definition pph_threshold (d : t) : nat := surveillance_threshold d.
 
 Definition severe_pph_threshold (d : t) : nat :=
   match d with
-  | Vaginal => 1000
-  | Cesarean => 1500
+  | Vaginal => ClinicalParameters.vaginal_stage3
+  | Cesarean => ClinicalParameters.cesarean_stage3
   end.
+
+Lemma vaginal_surveillance_500 : surveillance_threshold Vaginal = 500.
+Proof. reflexivity. Qed.
+
+Lemma cesarean_surveillance_1000 : surveillance_threshold Cesarean = 1000.
+Proof. reflexivity. Qed.
 
 Lemma vaginal_threshold_500 : pph_threshold Vaginal = 500.
 Proof. reflexivity. Qed.
@@ -910,12 +943,38 @@ Proof. reflexivity. Qed.
 Lemma cesarean_threshold_1000 : pph_threshold Cesarean = 1000.
 Proof. reflexivity. Qed.
 
-Lemma severe_exceeds_primary : forall d : t, pph_threshold d < severe_pph_threshold d.
-Proof. intros []; simpl; lia. Qed.
+Lemma severe_exceeds_surveillance : forall d : t, surveillance_threshold d < severe_pph_threshold d.
+Proof.
+  intros []; unfold surveillance_threshold, severe_pph_threshold,
+    ClinicalParameters.vaginal_stage2, ClinicalParameters.vaginal_stage3,
+    ClinicalParameters.cesarean_stage2, ClinicalParameters.cesarean_stage3,
+    ClinicalParameters.value; simpl; lia.
+Qed.
 
+Lemma severe_exceeds_primary : forall d : t, pph_threshold d < severe_pph_threshold d.
+Proof.
+  intros []; unfold pph_threshold, surveillance_threshold, severe_pph_threshold,
+    ClinicalParameters.vaginal_stage2, ClinicalParameters.vaginal_stage3,
+    ClinicalParameters.cesarean_stage2, ClinicalParameters.cesarean_stage3,
+    ClinicalParameters.value; simpl; lia.
+Qed.
+
+(** Surveillance trigger (NOT formal PPH diagnosis). *)
+Definition triggers_surveillance (d : t) (ebl : nat) : bool := surveillance_threshold d <=? ebl.
+
+(** Legacy alias - prefer triggers_surveillance or is_pph_acog. *)
 Definition is_pph (d : t) (ebl : nat) : bool := pph_threshold d <=? ebl.
 
 Definition is_severe_pph (d : t) (ebl : nat) : bool := severe_pph_threshold d <=? ebl.
+
+Lemma severe_implies_surveillance : forall d ebl,
+  is_severe_pph d ebl = true -> triggers_surveillance d ebl = true.
+Proof.
+  intros d ebl H.
+  unfold is_severe_pph, triggers_surveillance in *.
+  apply Nat.leb_le in H. apply Nat.leb_le.
+  pose proof (severe_exceeds_surveillance d). lia.
+Qed.
 
 Lemma severe_implies_pph : forall d ebl,
   is_severe_pph d ebl = true -> is_pph d ebl = true.
@@ -925,6 +984,23 @@ Proof.
   apply Nat.leb_le in H. apply Nat.leb_le.
   pose proof (severe_exceeds_primary d). lia.
 Qed.
+
+(** Key theorem: Severe PPH always meets ACOG formal definition. *)
+Lemma severe_implies_acog_pph : forall d ebl,
+  is_severe_pph d ebl = true -> is_pph_acog_ebl ebl = true.
+Proof.
+  intros d ebl H.
+  unfold is_severe_pph, is_pph_acog_ebl, acog_pph_threshold, severe_pph_threshold in *.
+  unfold ClinicalParameters.vaginal_stage3, ClinicalParameters.cesarean_stage3,
+    ClinicalParameters.value in *.
+  apply Nat.leb_le in H. apply Nat.leb_le.
+  destruct d; simpl in H; lia.
+Qed.
+
+(** Hypovolemia alone can trigger PPH diagnosis even with low EBL. *)
+Lemma hypovolemia_triggers_acog_pph : forall ebl,
+  is_pph_acog ebl true = true.
+Proof. intros. unfold is_pph_acog. simpl. apply orb_true_r. Qed.
 
 End DeliveryMode.
 
@@ -2844,8 +2920,28 @@ End RateOfLoss.
 (*                                                                            *)
 (*                              STAGE                                         *)
 (*                                                                            *)
-(*  The four stages of postpartum hemorrhage severity based on estimated     *)
-(*  blood loss (EBL) in milliliters.                                         *)
+(*  IMPORTANT: This is NOT the same as CMQCC OB Hemorrhage Toolkit staging.   *)
+(*                                                                            *)
+(*  This file uses a simplified 4-stage EBL-based model (Stage 1-4):          *)
+(*    Stage 1: Below surveillance threshold (monitoring)                      *)
+(*    Stage 2: At/above surveillance threshold (uterotonics)                  *)
+(*    Stage 3: Escalated hemorrhage (transfusion)                             *)
+(*    Stage 4: Massive hemorrhage (surgical intervention)                     *)
+(*                                                                            *)
+(*  CMQCC OB Hemorrhage Toolkit v2.0 uses Stage 0-3 with different criteria:  *)
+(*    CMQCC Stage 0: Risk assessment, no active hemorrhage                    *)
+(*    CMQCC Stage 1: >500mL vaginal OR >1000mL cesarean WITH continued        *)
+(*                   bleeding OR vital sign instability                       *)
+(*    CMQCC Stage 2: Continued bleeding despite Stage 1 interventions         *)
+(*    CMQCC Stage 3: Refractory hemorrhage requiring aggressive intervention  *)
+(*                                                                            *)
+(*  Key differences from CMQCC:                                               *)
+(*    1. CMQCC requires "continued bleeding" criterion, not just EBL          *)
+(*    2. CMQCC includes vital signs in staging criteria                       *)
+(*    3. CMQCC uses 0-3 numbering; this model uses 1-4                        *)
+(*    4. This model is EBL-primary; CMQCC is response-to-treatment-primary    *)
+(*                                                                            *)
+(*  For CMQCC-faithful staging, see CMQCCStage module below.                  *)
 (*                                                                            *)
 (******************************************************************************)
 
@@ -2932,28 +3028,33 @@ Proof. intros []; unfold le, to_nat; lia. Qed.
 Lemma stage4_is_maximum : forall s : t, s <=s Stage4.
 Proof. intros []; unfold le, to_nat; lia. Qed.
 
-(** EBL thresholds in milliliters per ACOG 2017 - delivery mode specific *)
+(** EBL thresholds - reference ClinicalParameters for single source of truth. *)
 Definition threshold_stage2 (d : DeliveryMode.t) : nat :=
   match d with
-  | DeliveryMode.Vaginal => 500
-  | DeliveryMode.Cesarean => 1000
+  | DeliveryMode.Vaginal => ClinicalParameters.vaginal_stage2
+  | DeliveryMode.Cesarean => ClinicalParameters.cesarean_stage2
   end.
 
 Definition threshold_stage3 (d : DeliveryMode.t) : nat :=
   match d with
-  | DeliveryMode.Vaginal => 1000
-  | DeliveryMode.Cesarean => 1500
+  | DeliveryMode.Vaginal => ClinicalParameters.vaginal_stage3
+  | DeliveryMode.Cesarean => ClinicalParameters.cesarean_stage3
   end.
 
 Definition threshold_stage4 (d : DeliveryMode.t) : nat :=
   match d with
-  | DeliveryMode.Vaginal => 1500
-  | DeliveryMode.Cesarean => 2000
+  | DeliveryMode.Vaginal => ClinicalParameters.vaginal_stage4
+  | DeliveryMode.Cesarean => ClinicalParameters.cesarean_stage4
   end.
 
 Lemma thresholds_strictly_increasing : forall d : DeliveryMode.t,
   threshold_stage2 d < threshold_stage3 d /\ threshold_stage3 d < threshold_stage4 d.
-Proof. intros []; unfold threshold_stage2, threshold_stage3, threshold_stage4; lia. Qed.
+Proof.
+  intros []; unfold threshold_stage2, threshold_stage3, threshold_stage4,
+    ClinicalParameters.vaginal_stage2, ClinicalParameters.vaginal_stage3, ClinicalParameters.vaginal_stage4,
+    ClinicalParameters.cesarean_stage2, ClinicalParameters.cesarean_stage3, ClinicalParameters.cesarean_stage4,
+    ClinicalParameters.value; simpl; lia.
+Qed.
 
 Lemma vaginal_threshold_stage2 : threshold_stage2 DeliveryMode.Vaginal = 500.
 Proof. reflexivity. Qed.
@@ -2962,10 +3063,20 @@ Lemma cesarean_threshold_stage2 : threshold_stage2 DeliveryMode.Cesarean = 1000.
 Proof. reflexivity. Qed.
 
 Lemma threshold_stage2_le_stage3 : forall d, threshold_stage2 d <= threshold_stage3 d.
-Proof. intros []; simpl; lia. Qed.
+Proof.
+  intros []; unfold threshold_stage2, threshold_stage3,
+    ClinicalParameters.vaginal_stage2, ClinicalParameters.vaginal_stage3,
+    ClinicalParameters.cesarean_stage2, ClinicalParameters.cesarean_stage3,
+    ClinicalParameters.value; simpl; lia.
+Qed.
 
 Lemma threshold_stage3_le_stage4 : forall d, threshold_stage3 d <= threshold_stage4 d.
-Proof. intros []; simpl; lia. Qed.
+Proof.
+  intros []; unfold threshold_stage3, threshold_stage4,
+    ClinicalParameters.vaginal_stage3, ClinicalParameters.vaginal_stage4,
+    ClinicalParameters.cesarean_stage3, ClinicalParameters.cesarean_stage4,
+    ClinicalParameters.value; simpl; lia.
+Qed.
 
 Definition of_ebl (d : DeliveryMode.t) (ebl : nat) : t :=
   if ebl <? threshold_stage2 d then Stage1
@@ -3137,6 +3248,85 @@ Lemma threshold_stage4_matches_params_cesarean :
 Proof. reflexivity. Qed.
 
 End Stage.
+
+(******************************************************************************)
+(*                                                                            *)
+(*                       CMQCC-FAITHFUL STAGING                               *)
+(*                                                                            *)
+(*  CMQCC OB Hemorrhage Toolkit v2.0 staging (Stage 0-3).                     *)
+(*  Unlike the simplified Stage module above, this requires:                  *)
+(*    - Continued bleeding criterion                                          *)
+(*    - Vital sign instability criterion                                      *)
+(*    - Response to treatment assessment                                      *)
+(*                                                                            *)
+(******************************************************************************)
+
+Module CMQCCStage.
+
+Inductive t : Type :=
+  | Stage0 : t
+  | Stage1 : t
+  | Stage2 : t
+  | Stage3 : t.
+
+Definition to_nat (s : t) : nat :=
+  match s with
+  | Stage0 => 0
+  | Stage1 => 1
+  | Stage2 => 2
+  | Stage3 => 3
+  end.
+
+Record StagingCriteria : Type := MkCriteria {
+  ebl_mL : nat;
+  delivery_mode : DeliveryMode.t;
+  continued_bleeding : bool;
+  vital_signs_unstable : bool;
+  response_to_stage1_tx : bool;
+  refractory_to_treatment : bool
+}.
+
+Definition ebl_threshold (d : DeliveryMode.t) : nat :=
+  match d with
+  | DeliveryMode.Vaginal => 500
+  | DeliveryMode.Cesarean => 1000
+  end.
+
+Definition meets_ebl_criterion (c : StagingCriteria) : bool :=
+  ebl_threshold (delivery_mode c) <=? ebl_mL c.
+
+Definition of_criteria (c : StagingCriteria) : t :=
+  if refractory_to_treatment c then Stage3
+  else if negb (response_to_stage1_tx c) && meets_ebl_criterion c then Stage2
+  else if meets_ebl_criterion c && (continued_bleeding c || vital_signs_unstable c) then Stage1
+  else Stage0.
+
+Definition to_simplified_stage (s : t) : Stage.t :=
+  match s with
+  | Stage0 => Stage.Stage1
+  | Stage1 => Stage.Stage2
+  | Stage2 => Stage.Stage3
+  | Stage3 => Stage.Stage4
+  end.
+
+Lemma cmqcc_stage3_maps_to_stage4 :
+  to_simplified_stage Stage3 = Stage.Stage4.
+Proof. reflexivity. Qed.
+
+Lemma cmqcc_requires_continued_bleeding_or_vitals : forall c,
+  of_criteria c = Stage1 ->
+  continued_bleeding c = true \/ vital_signs_unstable c = true.
+Proof.
+  intros c H.
+  unfold of_criteria in H.
+  destruct (refractory_to_treatment c); [discriminate|].
+  destruct (negb (response_to_stage1_tx c) && meets_ebl_criterion c); [discriminate|].
+  destruct (meets_ebl_criterion c && (continued_bleeding c || vital_signs_unstable c)) eqn:E; [|discriminate].
+  apply andb_true_iff in E. destruct E as [_ E].
+  apply orb_true_iff in E. exact E.
+Qed.
+
+End CMQCCStage.
 
 (******************************************************************************)
 (*                                                                            *)
@@ -3773,8 +3963,10 @@ Record TXAState : Type := MkTXAState {
 Definition initial_state : TXAState :=
   MkTXAState false None false true.
 
+(** WOMAN trial: TXA should be given "within 3 hours" of hemorrhage onset.
+    Using <= to allow administration at exactly 180 minutes. *)
 Definition can_give_first_dose (s : TXAState) (minutes_since_onset : nat) : bool :=
-  negb (first_dose_given s) && (minutes_since_onset <? max_minutes_from_onset).
+  negb (first_dose_given s) && (minutes_since_onset <=? max_minutes_from_onset).
 
 Definition can_give_second_dose (s : TXAState) (current_time : nat) : bool :=
   match first_dose_time_min s with
@@ -3792,11 +3984,11 @@ Definition give_second_dose (s : TXAState) : TXAState :=
   MkTXAState true (first_dose_time_min s) true (bleeding_ongoing s).
 
 Lemma first_dose_within_window : forall s t,
-  can_give_first_dose s t = true -> t < max_minutes_from_onset.
+  can_give_first_dose s t = true -> t <= max_minutes_from_onset.
 Proof.
   intros s t H. unfold can_give_first_dose in H.
   destruct (first_dose_given s); simpl in H; try discriminate.
-  apply Nat.ltb_lt in H. exact H.
+  apply Nat.leb_le in H. exact H.
 Qed.
 
 Lemma second_requires_first : forall s t,
@@ -3808,15 +4000,17 @@ Proof.
   reflexivity.
 Qed.
 
+(** TXA indicated per WOMAN trial: EBL >= 500mL within 3 hours of onset.
+    Using <= to allow at exactly 180 minutes per "within 3 hours" wording. *)
 Definition txa_indicated (ebl : nat) (minutes_since_onset : nat) : bool :=
-  (500 <=? ebl) && (minutes_since_onset <? max_minutes_from_onset).
+  (500 <=? ebl) && (minutes_since_onset <=? max_minutes_from_onset).
 
 Lemma early_txa_better : forall ebl t1 t2,
-  t1 < t2 -> txa_indicated ebl t2 = true -> txa_indicated ebl t1 = true.
+  t1 <= t2 -> txa_indicated ebl t2 = true -> txa_indicated ebl t1 = true.
 Proof.
-  intros ebl t1 t2 Hlt H. unfold txa_indicated in *.
+  intros ebl t1 t2 Hle H. unfold txa_indicated in *.
   destruct (500 <=? ebl) eqn:E; simpl in *; try discriminate.
-  apply Nat.ltb_lt in H. apply Nat.ltb_lt. lia.
+  apply Nat.leb_le in H. apply Nat.leb_le. lia.
 Qed.
 
 End TXA.
@@ -3831,8 +4025,9 @@ End TXA.
 
 Module MTP.
 
-Definition activation_ebl_threshold : nat := 1500.
-Definition activation_shock_index_x10_threshold : nat := 14.
+(** MTP activation thresholds - reference ClinicalParameters for single source of truth. *)
+Definition activation_ebl_threshold : nat := ClinicalParameters.mtp_ebl.
+Definition activation_shock_index_x10_threshold : nat := ClinicalParameters.value ClinicalParameters.mtp_si_threshold_x10.
 
 (** ABO Blood Type System *)
 Inductive BloodType : Type :=
@@ -4984,12 +5179,17 @@ Definition labs_suggest_escalation (s : ClinicalState) : bool :=
 Definition rate_suggests_escalation (s : ClinicalState) : bool :=
   RateOfLoss.is_rapid (rate_of_loss s).
 
+(** Effective stage calculation.
+    IMPORTANT: Uses SUM of escalation factors, not MAX.
+    Multiple concerning findings (vitals + labs + rapid rate) should escalate
+    more than a single finding. Total bump capped at 2 to prevent over-escalation. *)
 Definition effective_stage (s : ClinicalState) : nat :=
   let base := Stage.to_nat (ebl_stage s) in
   let vitals_bump := if vitals_suggest_escalation s then 1 else 0 in
   let labs_bump := if labs_suggest_escalation s then 1 else 0 in
   let rate_bump := if rate_suggests_escalation s then 1 else 0 in
-  Nat.min 4 (base + Nat.max vitals_bump (Nat.max labs_bump rate_bump)).
+  let total_bump := Nat.min 2 (vitals_bump + labs_bump + rate_bump) in
+  Nat.min 4 (base + total_bump).
 
 Definition effective_stage_t (s : ClinicalState) : Stage.t :=
   match effective_stage s with
@@ -5007,10 +5207,9 @@ Proof.
   set (v := if vitals_suggest_escalation s then 1 else 0).
   set (l := if labs_suggest_escalation s then 1 else 0).
   set (r := if rate_suggests_escalation s then 1 else 0).
-  assert (H1 : base <= base + Nat.max v (Nat.max l r)) by lia.
-  assert (H2 : Nat.min 4 (base + Nat.max v (Nat.max l r)) <= base + Nat.max v (Nat.max l r))
-    by apply Nat.le_min_r.
-  destruct (Nat.le_ge_cases 4 (base + Nat.max v (Nat.max l r))) as [Hcase|Hcase].
+  set (total_bump := Nat.min 2 (v + l + r)).
+  assert (H1 : base <= base + total_bump) by lia.
+  destruct (Nat.le_ge_cases 4 (base + total_bump)) as [Hcase|Hcase].
   - rewrite Nat.min_l by lia.
     pose proof (Stage.to_nat_upper_bound (ebl_stage s)). lia.
   - rewrite Nat.min_r by lia. lia.
@@ -5031,11 +5230,12 @@ Proof.
   set (v := if vitals_suggest_escalation s then 1 else 0).
   set (l := if labs_suggest_escalation s then 1 else 0).
   set (r := if rate_suggests_escalation s then 1 else 0).
+  set (total_bump := Nat.min 2 (v + l + r)).
   assert (Hbase: 1 <= base).
   { unfold base. unfold ebl_stage.
     destruct (Stage.of_ebl (delivery_mode s) (ebl s)); simpl; lia. }
-  assert (H: 1 <= base + Nat.max v (Nat.max l r)) by lia.
-  destruct (Nat.le_ge_cases 4 (base + Nat.max v (Nat.max l r))) as [Hcase|Hcase].
+  assert (H: 1 <= base + total_bump) by lia.
+  destruct (Nat.le_ge_cases 4 (base + total_bump)) as [Hcase|Hcase].
   - rewrite Nat.min_l by lia. lia.
   - rewrite Nat.min_r by lia. lia.
 Qed.
@@ -5193,13 +5393,15 @@ Proof.
   apply div_smaller_divisor_larger; lia.
 Qed.
 
-(** Effective stage incorporating percent-based logic *)
+(** Effective stage incorporating percent-based logic.
+    Uses SUM of escalation factors (capped at 2), consistent with effective_stage. *)
 Definition effective_stage_with_pct (s : ClinicalState) : nat :=
   let base := combined_stage s in
   let vitals_bump := if vitals_suggest_escalation s then 1 else 0 in
   let labs_bump := if labs_suggest_escalation s then 1 else 0 in
   let rate_bump := if rate_suggests_escalation s then 1 else 0 in
-  Nat.min 4 (base + Nat.max vitals_bump (Nat.max labs_bump rate_bump)).
+  let total_bump := Nat.min 2 (vitals_bump + labs_bump + rate_bump) in
+  Nat.min 4 (base + total_bump).
 
 Lemma effective_stage_with_pct_ge_combined : forall s,
   combined_stage s <= effective_stage_with_pct s.
@@ -5209,8 +5411,9 @@ Proof.
   set (v := if vitals_suggest_escalation s then 1 else 0).
   set (l := if labs_suggest_escalation s then 1 else 0).
   set (r := if rate_suggests_escalation s then 1 else 0).
+  set (total_bump := Nat.min 2 (v + l + r)).
   pose proof (combined_stage_valid s) as [Hlo Hhi].
-  destruct (Nat.le_ge_cases 4 (base + Nat.max v (Nat.max l r))) as [Hcase|Hcase].
+  destruct (Nat.le_ge_cases 4 (base + total_bump)) as [Hcase|Hcase].
   - rewrite Nat.min_l by lia. lia.
   - rewrite Nat.min_r by lia. lia.
 Qed.
@@ -6583,7 +6786,8 @@ Definition stage_antepartum (ebl : nat) : nat :=
 Lemma antepartum_thresholds_lower_than_postpartum :
   stage2_threshold_antepartum < Stage.threshold_stage2 DeliveryMode.Vaginal.
 Proof.
-  unfold stage2_threshold_antepartum, Stage.threshold_stage2. simpl. lia.
+  unfold stage2_threshold_antepartum, Stage.threshold_stage2,
+    ClinicalParameters.vaginal_stage2, ClinicalParameters.value. simpl. lia.
 Qed.
 
 (** Fetal status consideration *)
@@ -6675,8 +6879,11 @@ Extraction "pph_extracted"
   Units.BloodLoss Units.BloodLossMethod Units.corrected_blood_loss
   Units.TempCelsius
   Stage.t Stage.of_ebl Stage.to_nat
+  CMQCCStage.t CMQCCStage.of_criteria CMQCCStage.to_simplified_stage
   Intervention.t Intervention.of_ebl Intervention.of_stage
-  DeliveryMode.t DeliveryMode.pph_threshold
+  DeliveryMode.t DeliveryMode.pph_threshold DeliveryMode.acog_pph_threshold
+  DeliveryMode.is_pph_acog DeliveryMode.is_pph_acog_ebl
+  DeliveryMode.surveillance_threshold DeliveryMode.triggers_surveillance
   HemorrhageTiming.t HemorrhageTiming.is_primary HemorrhageTiming.is_secondary
   HemorrhageTiming.SecondaryPPHCause HemorrhageTiming.requires_antibiotics
   HemorrhageTiming.SecondaryStage HemorrhageTiming.secondary_stage_of_ebl
