@@ -162,17 +162,27 @@ Open Scope nat_scope.
 
 Module ClinicalParameters.
 
+(** CitedValue pairs a clinical parameter with its literature source.
+    The source_id field provides provenance tracking for audit purposes.
+    Source IDs are defined below; values can be traced to their citations. *)
 Record CitedValue : Type := MkCited {
   value : nat;
   source_id : nat
 }.
 
-Definition src_ACOG2017 : nat := 1.
-Definition src_CMQCC2015 : nat := 2.
-Definition src_WOMAN2017 : nat := 3.
-Definition src_Nathan2015 : nat := 4.
-Definition src_Bose2006 : nat := 5.
-Definition src_ATLS10 : nat := 6.
+(** Literature source identifiers for provenance tracking. *)
+Definition src_ACOG2017 : nat := 1.   (** ACOG Practice Bulletin 183 (2017) *)
+Definition src_CMQCC2015 : nat := 2.  (** California MQC Collaborative OB Hemorrhage Toolkit v2.0 *)
+Definition src_WOMAN2017 : nat := 3.  (** WOMAN Trial, Lancet 2017 *)
+Definition src_Nathan2015 : nat := 4. (** Nathan et al. BJOG 2015;122:268-275 *)
+Definition src_Bose2006 : nat := 5.   (** Bose et al. BJOG 2006 *)
+Definition src_ATLS10 : nat := 6.     (** ATLS 10th Edition *)
+
+(** Accessor for source provenance. *)
+Definition get_source (cv : CitedValue) : nat := source_id cv.
+
+(** All source IDs are valid (1-6). *)
+Definition valid_source (src : nat) : bool := (1 <=? src) && (src <=? 6).
 
 (** EBL thresholds adapted from CMQCC OB Hemorrhage Toolkit v2.0 (2015).
     NOTE: These are EBL-only thresholds. CMQCC staging also requires
@@ -2596,7 +2606,8 @@ Definition first_line_treatment (e : t) : nat :=
   | Thrombin => 3
   end.
 
-Lemma tone_most_common : forall e : t,
+(** Tone has maximum prevalence among all etiologies. *)
+Lemma tone_prevalence_exceeds_others : forall e : t,
   e <> Tone -> approximate_prevalence_pct Tone > approximate_prevalence_pct e.
 Proof. intros [] H; try contradiction; simpl; lia. Qed.
 
@@ -3554,10 +3565,12 @@ Definition is_contraindicated (c : Contraindications) (a : Agent) : bool :=
 Definition safe_agents (c : Contraindications) : list Agent :=
   filter (fun a => negb (is_contraindicated c a)) [Oxytocin; Methylergonovine; Carboprost; Misoprostol].
 
-Lemma oxytocin_always_safe : forall c, is_contraindicated c Oxytocin = false.
+(** Oxytocin has no contraindications in this model. *)
+Lemma oxytocin_never_contraindicated : forall c, is_contraindicated c Oxytocin = false.
 Proof. intros c. reflexivity. Qed.
 
-Lemma misoprostol_always_safe : forall c, is_contraindicated c Misoprostol = false.
+(** Misoprostol has no contraindications in this model. *)
+Lemma misoprostol_never_contraindicated : forall c, is_contraindicated c Misoprostol = false.
 Proof. intros c. reflexivity. Qed.
 
 Lemma oxytocin_in_safe_agents : forall c, In Oxytocin (safe_agents c).
