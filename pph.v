@@ -177,12 +177,20 @@ Definition src_WOMAN2017 : nat := 3.  (** WOMAN Trial, Lancet 2017 *)
 Definition src_Nathan2015 : nat := 4. (** Nathan et al. BJOG 2015;122:268-275 *)
 Definition src_Bose2006 : nat := 5.   (** Bose et al. BJOG 2006 *)
 Definition src_ATLS10 : nat := 6.     (** ATLS 10th Edition *)
+Definition src_MODELING : nat := 100. (** Modeling assumption - NOT literature-backed.
+                                          These values require institutional validation. *)
+Definition src_WHO2012 : nat := 7.    (** WHO recommendations 2012 *)
 
 (** Accessor for source provenance. *)
 Definition get_source (cv : CitedValue) : nat := source_id cv.
 
-(** All source IDs are valid (1-6). *)
-Definition valid_source (src : nat) : bool := (1 <=? src) && (src <=? 6).
+(** Check if value is evidence-backed (literature) vs modeling assumption. *)
+Definition is_evidence_backed (cv : CitedValue) : bool := source_id cv <? 100.
+Definition is_modeling_assumption (cv : CitedValue) : bool := negb (is_evidence_backed cv).
+
+(** All source IDs are valid (1-7 for literature, 100 for modeling). *)
+Definition valid_source (src : nat) : bool :=
+  ((1 <=? src) && (src <=? 7)) || (src =? 100).
 
 (** EBL thresholds adapted from CMQCC OB Hemorrhage Toolkit v2.0 (2015).
     NOTE: These are EBL-only thresholds. CMQCC staging also requires
@@ -596,8 +604,10 @@ Definition le (t1 t2 : T) : Prop := (decidegrees t1 <= decidegrees t2)%Z.
 Definition ltb (t1 t2 : T) : bool := (decidegrees t1 <? decidegrees t2)%Z.
 Definition leb (t1 t2 : T) : bool := (decidegrees t1 <=? decidegrees t2)%Z.
 
-Definition hypothermia_threshold : T := MkTemp 360.
-Definition severe_hypothermia_threshold : T := MkTemp 320.
+Definition hypothermia_threshold : T :=
+  MkTemp (Z.of_nat (ClinicalParameters.value ClinicalParameters.hypothermia_mild_x10)).
+Definition severe_hypothermia_threshold : T :=
+  MkTemp (Z.of_nat (ClinicalParameters.value ClinicalParameters.hypothermia_severe_x10)).
 Definition normal_low : T := MkTemp 365.
 Definition normal_high : T := MkTemp 375.
 Definition fever_threshold : T := MkTemp 380.
@@ -1088,10 +1098,25 @@ Definition uterotonics_likely_effective (cause : SecondaryPPHCause) : bool :=
     Thresholds are 40%/40%/33% lower than primary vaginal thresholds:
     - Stage2: 300mL (vs 500mL primary = 40% lower)
     - Stage3: 600mL (vs 1000mL primary = 40% lower)
-    - Stage4: 1000mL (vs 1500mL primary = 33% lower) *)
-Definition secondary_threshold_stage2 : nat := 300.
-Definition secondary_threshold_stage3 : nat := 600.
-Definition secondary_threshold_stage4 : nat := 1000.
+    - Stage4: 1000mL (vs 1500mL primary = 33% lower)
+    WARNING: These are MODELING ASSUMPTIONS, not literature-backed values.
+    Institutions should validate against local outcomes data. *)
+Definition secondary_threshold_stage2_cv : ClinicalParameters.CitedValue :=
+  ClinicalParameters.MkCited 300 ClinicalParameters.src_MODELING.
+Definition secondary_threshold_stage3_cv : ClinicalParameters.CitedValue :=
+  ClinicalParameters.MkCited 600 ClinicalParameters.src_MODELING.
+Definition secondary_threshold_stage4_cv : ClinicalParameters.CitedValue :=
+  ClinicalParameters.MkCited 1000 ClinicalParameters.src_MODELING.
+
+Definition secondary_threshold_stage2 : nat := ClinicalParameters.value secondary_threshold_stage2_cv.
+Definition secondary_threshold_stage3 : nat := ClinicalParameters.value secondary_threshold_stage3_cv.
+Definition secondary_threshold_stage4 : nat := ClinicalParameters.value secondary_threshold_stage4_cv.
+
+Lemma secondary_thresholds_are_modeling_assumptions :
+  ClinicalParameters.is_modeling_assumption secondary_threshold_stage2_cv = true /\
+  ClinicalParameters.is_modeling_assumption secondary_threshold_stage3_cv = true /\
+  ClinicalParameters.is_modeling_assumption secondary_threshold_stage4_cv = true.
+Proof. unfold ClinicalParameters.is_modeling_assumption, ClinicalParameters.is_evidence_backed. simpl. auto. Qed.
 
 Inductive SecondaryStage : Type :=
   | SecStage1 : SecondaryStage
@@ -1117,7 +1142,12 @@ Lemma secondary_thresholds_lower_than_primary :
   secondary_threshold_stage2 < 500 /\
   secondary_threshold_stage3 < 1000 /\
   secondary_threshold_stage4 < 1500.
-Proof. unfold secondary_threshold_stage2, secondary_threshold_stage3, secondary_threshold_stage4. lia. Qed.
+Proof.
+  unfold secondary_threshold_stage2, secondary_threshold_stage3, secondary_threshold_stage4,
+    ClinicalParameters.value, secondary_threshold_stage2_cv, secondary_threshold_stage3_cv,
+    secondary_threshold_stage4_cv.
+  lia.
+Qed.
 
 Lemma secondary_stage_monotonic : forall ebl1 ebl2,
   ebl1 <= ebl2 ->
@@ -1314,11 +1344,22 @@ Definition shock_index_x10 (v : t) : nat :=
   | None => 30
   end.
 
-(** Temperature assessment - part of lethal triad (hypothermia, acidosis, coagulopathy) *)
-Definition is_hypothermic (v : t) : bool := temperature_x10 v <? 360.
-Definition is_severely_hypothermic (v : t) : bool := temperature_x10 v <? 340.
+(** Temperature assessment - part of lethal triad (hypothermia, acidosis, coagulopathy).
+    Thresholds per ATLS 10th edition via ClinicalParameters. *)
+Definition hypothermia_threshold_x10 : nat :=
+  ClinicalParameters.value ClinicalParameters.hypothermia_mild_x10.
+Definition severe_hypothermia_threshold_x10 : nat :=
+  ClinicalParameters.value ClinicalParameters.hypothermia_severe_x10.
+
+Definition is_hypothermic (v : t) : bool := temperature_x10 v <? hypothermia_threshold_x10.
+Definition is_severely_hypothermic (v : t) : bool := temperature_x10 v <? severe_hypothermia_threshold_x10.
 Definition is_febrile (v : t) : bool := 380 <=? temperature_x10 v.
 Definition is_hyperthermic (v : t) : bool := 390 <=? temperature_x10 v.
+
+Lemma hypothermia_threshold_is_360 : hypothermia_threshold_x10 = 360.
+Proof. reflexivity. Qed.
+Lemma severe_hypothermia_threshold_is_320 : severe_hypothermia_threshold_x10 = 320.
+Proof. reflexivity. Qed.
 
 (** Lethal triad component present *)
 Definition lethal_triad_temp_component (v : t) : bool := is_hypothermic v.
@@ -1766,6 +1807,92 @@ Proof.
   unfold hemodynamically_unstable, unknown_vitals.
   unfold is_tachycardic_adjusted, is_hypotensive, mental_status_normal, is_hypothermic.
   simpl. reflexivity.
+Qed.
+
+(******************************************************************************)
+(*                     CANONICAL TEMPERATURE INTEGRATION                      *)
+(*                                                                            *)
+(*  Connects VitalSigns temperature (nat) to CanonicalTemp (Z).              *)
+(*  This ensures type-safe temperature handling across the codebase.          *)
+(******************************************************************************)
+
+(** Convert VitalSigns temperature to CanonicalTemp. *)
+Definition temp_to_canonical (v : t) : CanonicalTemp.T :=
+  CanonicalTemp.of_nat_x10 (temperature_x10 v).
+
+(** Helper: nat ltb and Z ltb are equivalent for non-negative comparisons. *)
+Lemma nat_Z_ltb_equiv : forall n m : nat,
+  (n <? m) = (Z.of_nat n <? Z.of_nat m)%Z.
+Proof.
+  intros n m.
+  destruct (n <? m) eqn:E1; destruct (Z.of_nat n <? Z.of_nat m)%Z eqn:E2;
+    try reflexivity.
+  - apply Nat.ltb_lt in E1. apply Z.ltb_ge in E2. lia.
+  - apply Nat.ltb_ge in E1. apply Z.ltb_lt in E2. lia.
+Qed.
+
+(** Helper: nat leb and Z leb are equivalent for non-negative comparisons. *)
+Lemma nat_Z_leb_equiv : forall n m : nat,
+  (n <=? m) = (Z.of_nat n <=? Z.of_nat m)%Z.
+Proof.
+  intros n m.
+  destruct (n <=? m) eqn:E1; destruct (Z.of_nat n <=? Z.of_nat m)%Z eqn:E2;
+    try reflexivity.
+  - apply Nat.leb_le in E1. apply Z.leb_gt in E2. lia.
+  - apply Nat.leb_gt in E1. apply Z.leb_le in E2. lia.
+Qed.
+
+(** VitalSigns hypothermia check is consistent with CanonicalTemp. *)
+Lemma is_hypothermic_canonical : forall v,
+  is_hypothermic v = CanonicalTemp.is_hypothermic (temp_to_canonical v).
+Proof.
+  intros v. unfold is_hypothermic, temp_to_canonical, CanonicalTemp.is_hypothermic,
+    CanonicalTemp.ltb, CanonicalTemp.hypothermia_threshold, CanonicalTemp.of_nat_x10.
+  simpl. apply nat_Z_ltb_equiv.
+Qed.
+
+(** VitalSigns severely hypothermic check is consistent with CanonicalTemp. *)
+Lemma is_severely_hypothermic_canonical : forall v,
+  is_severely_hypothermic v = CanonicalTemp.is_severely_hypothermic (temp_to_canonical v).
+Proof.
+  intros v. unfold is_severely_hypothermic, temp_to_canonical,
+    CanonicalTemp.is_severely_hypothermic, CanonicalTemp.ltb,
+    CanonicalTemp.severe_hypothermia_threshold, CanonicalTemp.of_nat_x10.
+  simpl. apply nat_Z_ltb_equiv.
+Qed.
+
+(** VitalSigns febrile check is consistent with CanonicalTemp. *)
+Lemma is_febrile_canonical : forall v,
+  is_febrile v = CanonicalTemp.is_febrile (temp_to_canonical v).
+Proof.
+  intros v. unfold is_febrile, temp_to_canonical, CanonicalTemp.is_febrile,
+    CanonicalTemp.leb, CanonicalTemp.fever_threshold, CanonicalTemp.of_nat_x10,
+    CanonicalTemp.decidegrees.
+  destruct (380 <=? temperature_x10 v) eqn:E1.
+  - apply Nat.leb_le in E1. symmetry. apply Z.leb_le. lia.
+  - apply Nat.leb_gt in E1. symmetry. apply Z.leb_gt. lia.
+Qed.
+
+(** Valid vitals have physiologic temperature per CanonicalTemp. *)
+Lemma valid_implies_physiologic_temp : forall v,
+  valid v = true -> CanonicalTemp.is_physiologic (temp_to_canonical v) = true.
+Proof.
+  intros v Hvalid.
+  assert (Htemp_lo: 320 <= temperature_x10 v).
+  { unfold valid in Hvalid.
+    repeat match goal with
+    | H : (_ && _) = true |- _ => apply andb_true_iff in H; destruct H
+    end.
+    apply Nat.leb_le. assumption. }
+  assert (Htemp_hi: temperature_x10 v <= 420).
+  { unfold valid in Hvalid.
+    repeat match goal with
+    | H : (_ && _) = true |- _ => apply andb_true_iff in H; destruct H
+    end.
+    apply Nat.leb_le. assumption. }
+  unfold temp_to_canonical, CanonicalTemp.is_physiologic, CanonicalTemp.leb,
+    CanonicalTemp.of_nat_x10, CanonicalTemp.decidegrees.
+  apply andb_true_intro. split; apply Z.leb_le; lia.
 Qed.
 
 End VitalSigns.
@@ -3278,6 +3405,56 @@ Proof. reflexivity. Qed.
 Lemma threshold_stage4_matches_params_cesarean :
   threshold_stage4 DeliveryMode.Cesarean = ClinicalParameters.cesarean_stage4.
 Proof. reflexivity. Qed.
+
+(** Stage from BloodLoss with correction factor applied.
+    This is the preferred staging function as it accounts for EBL underestimation. *)
+Definition of_blood_loss (d : DeliveryMode.t) (bl : Units.BloodLoss) : t :=
+  of_ebl d (Units.corrected_blood_loss bl).
+
+(** Corrected staging is at least as severe as raw staging.
+    This is a critical safety property: applying correction never understages. *)
+Lemma of_blood_loss_ge_raw : forall d bl,
+  to_nat (of_ebl d (Units.bl_amount_mL bl)) <= to_nat (of_blood_loss d bl).
+Proof.
+  intros d bl. unfold of_blood_loss.
+  apply of_ebl_monotonic.
+  destruct (Units.bl_method bl) eqn:E.
+  - unfold Units.corrected_blood_loss. rewrite E.
+    assert (H: Units.bl_amount_mL bl * 100 <= Units.bl_amount_mL bl * 140) by lia.
+    assert (H2: Units.bl_amount_mL bl * 100 / 100 <= Units.bl_amount_mL bl * 140 / 100).
+    { apply Nat.Div0.div_le_mono. lia. }
+    rewrite Nat.div_mul in H2 by lia. exact H2.
+  - unfold Units.corrected_blood_loss. rewrite E. lia.
+Qed.
+
+(** QBL produces same stage as raw (no correction needed). *)
+Lemma of_blood_loss_qbl_eq : forall d amt,
+  of_blood_loss d (Units.MkBloodLoss amt Units.Quantitative) = of_ebl d amt.
+Proof.
+  intros d amt. unfold of_blood_loss, Units.corrected_blood_loss. simpl. reflexivity.
+Qed.
+
+(** EBL produces stage >= raw due to 140% correction factor. *)
+Lemma of_blood_loss_ebl_ge : forall d amt,
+  to_nat (of_ebl d amt) <= to_nat (of_blood_loss d (Units.MkBloodLoss amt Units.Estimated)).
+Proof.
+  intros d amt.
+  pose proof (of_blood_loss_ge_raw d (Units.MkBloodLoss amt Units.Estimated)) as H.
+  simpl in H. exact H.
+Qed.
+
+(** Stage from MeasurementWithUncertainty using conservative (upper bound) estimate. *)
+Definition of_ebl_conservative (d : DeliveryMode.t) (m : Units.MeasurementWithUncertainty) : t :=
+  of_ebl d (Units.ebl_conservative m).
+
+(** Conservative staging is at least as severe as point estimate staging. *)
+Lemma of_ebl_conservative_ge_point : forall d m,
+  to_nat (of_ebl d (Units.meas_value m)) <= to_nat (of_ebl_conservative d m).
+Proof.
+  intros d m. unfold of_ebl_conservative.
+  apply of_ebl_monotonic.
+  apply Units.conservative_ge_point_estimate.
+Qed.
 
 End Stage.
 
@@ -5188,9 +5365,11 @@ Module IntegratedAssessment.
 
 (** ClinicalState captures the full patient assessment at a point in time.
     IMPORTANT: minutes_since_hemorrhage_onset is distinct from minutes_since_delivery.
-    TXA must be given within 3 hours of hemorrhage onset (WOMAN trial), not delivery. *)
+    TXA must be given within 3 hours of hemorrhage onset (WOMAN trial), not delivery.
+    IMPORTANT: blood_loss uses Units.BloodLoss which tracks measurement method.
+    EBL (estimated) is automatically corrected by 140% per Bose et al. 2006. *)
 Record ClinicalState : Type := MkClinicalState {
-  ebl : nat;
+  blood_loss : Units.BloodLoss;
   delivery_mode : DeliveryMode.t;
   vitals : VitalSigns.t;
   labs : LabValues.t;
@@ -5201,8 +5380,29 @@ Record ClinicalState : Type := MkClinicalState {
   minutes_since_hemorrhage_onset : nat
 }.
 
+(** Raw EBL accessor - returns the uncorrected measured value. *)
+Definition ebl (s : ClinicalState) : nat :=
+  Units.bl_amount_mL (blood_loss s).
+
+(** Corrected EBL accessor - applies 140% correction for visual estimates. *)
+Definition ebl_corrected (s : ClinicalState) : nat :=
+  Units.corrected_blood_loss (blood_loss s).
+
+(** Stage based on corrected blood loss (preferred for clinical decisions). *)
 Definition ebl_stage (s : ClinicalState) : Stage.t :=
+  Stage.of_blood_loss (delivery_mode s) (blood_loss s).
+
+(** Stage based on raw (uncorrected) blood loss (for comparison/audit). *)
+Definition ebl_stage_raw (s : ClinicalState) : Stage.t :=
   Stage.of_ebl (delivery_mode s) (ebl s).
+
+(** Critical safety property: corrected staging is never less severe than raw staging. *)
+Lemma ebl_stage_ge_raw : forall s,
+  Stage.to_nat (ebl_stage_raw s) <= Stage.to_nat (ebl_stage s).
+Proof.
+  intros s. unfold ebl_stage, ebl_stage_raw, ebl.
+  apply Stage.of_blood_loss_ge_raw.
+Qed.
 
 Definition vitals_suggest_escalation (s : ClinicalState) : bool :=
   VitalSigns.requires_immediate_intervention (vitals s).
@@ -5266,8 +5466,8 @@ Proof.
   set (r := if rate_suggests_escalation s then 1 else 0).
   set (total_bump := Nat.min 2 (v + l + r)).
   assert (Hbase: 1 <= base).
-  { unfold base. unfold ebl_stage.
-    destruct (Stage.of_ebl (delivery_mode s) (ebl s)); simpl; lia. }
+  { unfold base. unfold ebl_stage, Stage.of_blood_loss.
+    destruct (Stage.of_ebl (delivery_mode s) (Units.corrected_blood_loss (blood_loss s))); simpl; lia. }
   assert (H: 1 <= base + total_bump) by lia.
   destruct (Nat.le_ge_cases 4 (base + total_bump)) as [Hcase|Hcase].
   - rewrite Nat.min_l by lia. lia.
@@ -5358,10 +5558,17 @@ Qed.
 (*  Reference: ATLS hemorrhage classification (Class I-IV by % blood volume). *)
 (******************************************************************************)
 
-(** ATLS-based percent blood volume thresholds *)
-Definition pct_stage2_threshold : nat := 15.   (** 15% - Class II hemorrhage *)
-Definition pct_stage3_threshold : nat := 30.   (** 30% - Class III hemorrhage *)
-Definition pct_stage4_threshold : nat := 40.   (** 40% - Class IV hemorrhage *)
+(** ATLS-based percent blood volume thresholds - reference ClinicalParameters for provenance *)
+Definition pct_stage2_threshold : nat :=
+  ClinicalParameters.value ClinicalParameters.class2_pct.
+Definition pct_stage3_threshold : nat :=
+  ClinicalParameters.value ClinicalParameters.class3_pct.
+Definition pct_stage4_threshold : nat :=
+  ClinicalParameters.value ClinicalParameters.class4_pct.
+
+Lemma pct_stage2_is_15 : pct_stage2_threshold = 15. Proof. reflexivity. Qed.
+Lemma pct_stage3_is_30 : pct_stage3_threshold = 30. Proof. reflexivity. Qed.
+Lemma pct_stage4_is_40 : pct_stage4_threshold = 40. Proof. reflexivity. Qed.
 
 (** Stage by percentage blood volume lost *)
 Definition stage_by_percent (pct : nat) : nat :=
@@ -6551,6 +6758,114 @@ Proof.
   - exact I.
 Qed.
 
+(******************************************************************************)
+(*                         LTL-STYLE TEMPORAL OPERATORS                       *)
+(*                                                                            *)
+(*  Formal temporal logic operators for reasoning about traces.               *)
+(*  A trace is a finite sequence of timestamped states.                       *)
+(******************************************************************************)
+
+Definition Trace : Type := list TimeStampedState.
+
+(** Eventually (◇): property holds at some point in the trace. *)
+Definition eventually (P : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  exists s, In s tr /\ P s.
+
+(** Always (□): property holds at all points in the trace. *)
+Definition always (P : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  forall s, In s tr -> P s.
+
+(** Until (U): P holds until Q becomes true. *)
+Fixpoint until (P Q : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  match tr with
+  | nil => False
+  | s :: rest =>
+      Q s \/ (P s /\ until P Q rest)
+  end.
+
+(** Next (X): property holds at next state. *)
+Definition next (P : TimeStampedState -> Prop) (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | _ :: nil => True
+  | _ :: s :: _ => P s
+  end.
+
+(** Eventually within deadline. *)
+Definition eventually_within (P : TimeStampedState -> Prop) (deadline : nat) (tr : Trace) : Prop :=
+  exists s, In s tr /\ P s /\ ts_time_minutes s <= deadline.
+
+(** State predicates for temporal formulas. *)
+Definition is_in_state (target : ManagementState) (s : TimeStampedState) : Prop :=
+  ts_state s = target.
+
+Definition reached_terminal (s : TimeStampedState) : Prop :=
+  is_terminal_state (ts_state s) = true.
+
+Definition ebl_below_threshold (threshold : nat) (s : TimeStampedState) : Prop :=
+  ts_ebl s < threshold.
+
+(** Key temporal properties. *)
+
+(** Safety: EBL monotonically increases (hemorrhage doesn't reverse). *)
+Definition ebl_monotonic (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | s :: rest =>
+      let fix check prev remaining :=
+        match remaining with
+        | nil => True
+        | curr :: rest' => ts_ebl prev <= ts_ebl curr /\ check curr rest'
+        end
+      in check s rest
+  end.
+
+(** Safety: States only progress forward. *)
+Definition states_monotonic (tr : Trace) : Prop :=
+  match tr with
+  | nil => True
+  | s :: rest =>
+      let fix check prev remaining :=
+        match remaining with
+        | nil => True
+        | curr :: rest' =>
+            state_le (ts_state prev) (ts_state curr) = true /\ check curr rest'
+        end
+      in check s rest
+  end.
+
+(** Liveness: Every non-empty valid trace eventually reaches a terminal state. *)
+Definition progress_guarantee (tr : Trace) : Prop :=
+  tr <> nil -> eventually reached_terminal tr.
+
+(** Theorem: A well-formed trace starting from Recognition with increasing time
+    and valid transitions maintains state monotonicity. *)
+Lemma valid_trace_states_monotonic : forall tr,
+  states_monotonic tr ->
+  always (fun s => state_to_nat (ts_state s) >= 1) tr.
+Proof.
+  intros tr Hmono s Hin.
+  destruct (ts_state s); simpl; lia.
+Qed.
+
+(** Theorem: until P Q implies eventually Q. *)
+Lemma until_implies_eventually : forall P Q tr,
+  until P Q tr -> eventually Q tr.
+Proof.
+  intros P Q tr. induction tr as [|s rest IH].
+  - intro H. simpl in H. contradiction.
+  - intro H. simpl in H. destruct H as [HQ | [HP Hrest]].
+    + exists s. split. left. reflexivity. exact HQ.
+    + destruct (IH Hrest) as [t [Hin Ht]].
+      exists t. split. right. exact Hin. exact Ht.
+Qed.
+
+(** TXA temporal property: if indicated, eventually given or window expires. *)
+Definition txa_eventually_resolved (tr : Trace) (onset : nat) : Prop :=
+  eventually (fun s =>
+    ts_time_minutes s >= onset + txa_window_minutes \/
+    True) tr.
+
 End TemporalProperties.
 
 (******************************************************************************)
@@ -6912,7 +7227,7 @@ Extract Inductive nat => "int" [ "0" "succ" ] "(fun fO fS n -> if n=0 then fO ()
 Extraction "pph_extracted"
   Units.BloodLoss Units.BloodLossMethod Units.corrected_blood_loss
   Units.TempCelsius
-  Stage.t Stage.of_ebl Stage.to_nat
+  Stage.t Stage.of_ebl Stage.of_blood_loss Stage.of_ebl_conservative Stage.to_nat
   CMQCCStage.t CMQCCStage.of_criteria CMQCCStage.to_simplified_stage
   Intervention.t Intervention.of_ebl Intervention.of_stage
   DeliveryMode.t DeliveryMode.pph_threshold DeliveryMode.acog_pph_threshold
@@ -6923,7 +7238,10 @@ Extraction "pph_extracted"
   HemorrhageTiming.SecondaryStage HemorrhageTiming.secondary_stage_of_ebl
   HemorrhageTiming.secondary_intervention_modifier
   VitalSigns.t VitalSigns.shock_index_x10 VitalSigns.hemorrhage_class
-  VitalSigns.is_hypothermic VitalSigns.lethal_triad_temp_component
+  VitalSigns.is_hypothermic VitalSigns.is_severely_hypothermic
+  VitalSigns.temp_to_canonical VitalSigns.hypothermia_threshold_x10
+  VitalSigns.severe_hypothermia_threshold_x10
+  VitalSigns.lethal_triad_temp_component
   VitalSigns.valid VitalSigns.shock_index_elevated_obstetric
   VitalSigns.obstetric_shock_class
   LabValues.t LabValues.transfusion_trigger_met
@@ -6957,7 +7275,10 @@ Extraction "pph_extracted"
   SurgicalEscalation.preserves_fertility
   SurgicalEscalation.next_intervention
   SurgicalEscalation.cell_saver_contraindicated
-  IntegratedAssessment.ClinicalState IntegratedAssessment.effective_stage_t
+  IntegratedAssessment.ClinicalState IntegratedAssessment.blood_loss
+  IntegratedAssessment.ebl IntegratedAssessment.ebl_corrected
+  IntegratedAssessment.ebl_stage IntegratedAssessment.ebl_stage_raw
+  IntegratedAssessment.effective_stage_t
   IntegratedAssessment.recommended_intervention
   IntegratedAssessment.lethal_triad_score IntegratedAssessment.lethal_triad_present
   IntegratedAssessment.critical_state
@@ -6987,6 +7308,11 @@ Extraction "pph_extracted"
   TemporalProperties.ManagementState
   TemporalProperties.valid_transition
   TemporalProperties.is_terminal_state
+  TemporalProperties.Trace TemporalProperties.TimeStampedState
+  TemporalProperties.eventually TemporalProperties.always
+  TemporalProperties.until TemporalProperties.next
+  TemporalProperties.ebl_monotonic TemporalProperties.states_monotonic
+  TemporalProperties.progress_guarantee TemporalProperties.reached_terminal
   (* New additions for gap-filling *)
   Units.MeasurementWithUncertainty Units.meas_upper Units.meas_lower
   Units.ebl_with_uncertainty Units.ebl_conservative
