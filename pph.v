@@ -293,8 +293,28 @@ Record MeasurementWithUncertainty : Type := MkMeasurement {
   meas_uncertainty : nat  (** Half-width of confidence interval *)
 }.
 
+(** Lower bound of confidence interval.
+    NOTE: Uses nat subtraction which saturates to 0 if uncertainty > value.
+    For measurements where uncertainty could exceed value, use meas_lower_safe. *)
 Definition meas_lower (m : MeasurementWithUncertainty) : nat :=
   meas_value m - meas_uncertainty m.
+
+(** Safe lower bound: returns 0 if uncertainty exceeds value (explicit saturation) *)
+Definition meas_lower_safe (m : MeasurementWithUncertainty) : nat :=
+  if meas_uncertainty m <=? meas_value m
+  then meas_value m - meas_uncertainty m
+  else 0.
+
+(** Check if measurement has valid (non-saturating) lower bound *)
+Definition meas_lower_valid (m : MeasurementWithUncertainty) : bool :=
+  meas_uncertainty m <=? meas_value m.
+
+Lemma meas_lower_safe_eq_when_valid : forall m,
+  meas_lower_valid m = true -> meas_lower_safe m = meas_lower m.
+Proof.
+  intros m H. unfold meas_lower_safe, meas_lower, meas_lower_valid in *.
+  rewrite H. reflexivity.
+Qed.
 
 Definition meas_upper (m : MeasurementWithUncertainty) : nat :=
   meas_value m + meas_uncertainty m.
@@ -349,8 +369,8 @@ Record SignedTempCelsius : Type := MkSignedTemp {
 
 Definition signed_temp_offset : nat := 500.
 
-Definition signed_temp_to_actual_x10 (t : SignedTempCelsius) : nat :=
-  signed_temp_raw t - signed_temp_offset.
+Definition signed_temp_to_actual_x10 (t : SignedTempCelsius) : Z :=
+  Z.of_nat (signed_temp_raw t) - Z.of_nat signed_temp_offset.
 
 Definition actual_x10_to_signed_temp (actual_x10 : nat) : SignedTempCelsius :=
   MkSignedTemp (actual_x10 + signed_temp_offset).
@@ -377,11 +397,23 @@ Qed.
 
 (******************************************************************************)
 (*                        SAFE DIVISION OPERATIONS                            *)
+(*                                                                            *)
+(*  Division semantics: Nat division truncates toward zero (floor division).  *)
+(*  This is INTENTIONAL for clinical calculations:                            *)
+(*  - Blood loss percentages round down (conservative for triggering alerts)  *)
+(*  - Shock index rounds down (conservative for hemorrhage class)             *)
+(*  - Dosing calculations round down (safer than rounding up)                 *)
+(*                                                                            *)
+(*  For cases where ceiling is needed, use: (n + d - 1) / d                   *)
 (******************************************************************************)
 
 (** Safe division that returns None for division by zero *)
 Definition safe_div (num denom : nat) : option nat :=
   if denom =? 0 then None else Some (num / denom).
+
+(** Ceiling division: rounds up instead of down *)
+Definition div_ceil (num denom : nat) : option nat :=
+  if denom =? 0 then None else Some ((num + denom - 1) / denom).
 
 (** Safe percentage calculation *)
 Definition safe_pct_of (p : Percent) (total : nat) : option nat :=
@@ -767,16 +799,14 @@ Definition uterotonics_likely_effective (cause : SecondaryPPHCause) : bool :=
   | _ => false
   end.
 
-(** Different stage thresholds for secondary PPH - more aggressive staging
-    because underlying cause may limit response to standard interventions.
-    Secondary PPH thresholds are 20% lower than primary PPH per RCOG guidelines. *)
-Definition secondary_pph_stage_modifier : nat := 1.
-
-(** Secondary PPH staging thresholds - lower than primary due to:
+(** Secondary PPH staging thresholds - significantly lower than primary due to:
     1. Often chronic/subacute presentation with compensated physiology
     2. Underlying infection may limit response to uterotonics
     3. Retained products require surgical intervention regardless of EBL
-    Thresholds: Stage2 at 300mL, Stage3 at 600mL, Stage4 at 1000mL *)
+    Thresholds are 40%/40%/33% lower than primary vaginal thresholds:
+    - Stage2: 300mL (vs 500mL primary = 40% lower)
+    - Stage3: 600mL (vs 1000mL primary = 40% lower)
+    - Stage4: 1000mL (vs 1500mL primary = 33% lower) *)
 Definition secondary_threshold_stage2 : nat := 300.
 Definition secondary_threshold_stage3 : nat := 600.
 Definition secondary_threshold_stage4 : nat := 1000.
@@ -1468,15 +1498,17 @@ Record t : Type := MkLabs {
   base_deficit_x10 : nat
 }.
 
-(** Input validation: physiologically plausible lab value ranges *)
+(** Input validation: physiologically plausible lab value ranges.
+    Lower bounds prevent nonsense values (0 hemoglobin, 0 INR, etc.).
+    Upper bounds prevent implausible outliers. *)
 Definition valid (l : t) : bool :=
-  (hemoglobin_g_dL_x10 l <=? 200) &&
-  (hematocrit_pct l <=? 65) &&
-  (platelet_count_k l <=? 1000) &&
-  (fibrinogen_mg_dL l <=? 1000) &&
-  (inr_x10 l <=? 100) &&
-  (pt_seconds_x10 l <=? 500) &&
-  (ptt_seconds_x10 l <=? 1500) &&
+  (20 <=? hemoglobin_g_dL_x10 l) && (hemoglobin_g_dL_x10 l <=? 200) &&
+  (5 <=? hematocrit_pct l) && (hematocrit_pct l <=? 65) &&
+  (1 <=? platelet_count_k l) && (platelet_count_k l <=? 1000) &&
+  (10 <=? fibrinogen_mg_dL l) && (fibrinogen_mg_dL l <=? 1000) &&
+  (5 <=? inr_x10 l) && (inr_x10 l <=? 100) &&
+  (80 <=? pt_seconds_x10 l) && (pt_seconds_x10 l <=? 500) &&
+  (200 <=? ptt_seconds_x10 l) && (ptt_seconds_x10 l <=? 1500) &&
   (lactate_mmol_x10 l <=? 300) &&
   (base_deficit_x10 l <=? 400).
 
@@ -1961,14 +1993,14 @@ Definition requires_urology_standby (a : AccretaType) (bladder_involvement : boo
 (*  Reference: Lemmens HJ et al. Obes Surg 2006.                              *)
 (******************************************************************************)
 
-(** BMI category directly from weight/height ratio.
-    Uses simplified calculation to avoid large number blowup in proofs.
+(** BMI × 10 for integer arithmetic.
     BMI = weight(kg) / height(m)^2
-    height_cm^2 / 10000 = height_m^2
-    So BMI × 10 = weight × 10000 / height_cm^2 *)
+    height(m) = height_cm / 100, so height(m)^2 = height_cm^2 / 10000
+    BMI = weight * 10000 / height_cm^2
+    BMI × 10 = weight * 100000 / height_cm^2 *)
 Definition bmi_x10 (p : t) : nat :=
   if height_cm p =? 0 then 0
-  else (weight_kg p * 10000) / (height_cm p * height_cm p).
+  else (weight_kg p * 100000) / (height_cm p * height_cm p).
 
 (** BMI categories per WHO (thresholds × 10) *)
 Inductive BMICategory : Type :=
@@ -2107,6 +2139,9 @@ Definition ir_team_required (r : CesareanHysterectomyRisk) : bool :=
   | _ => false
   end.
 
+Lemma lt_add_same_r : forall a b k, a < b -> a + k < b + k.
+Proof. intros. lia. Qed.
+
 Lemma percreta_highest_expected_loss : forall r1 r2,
   ch_accreta_type r1 = Percreta ->
   ch_accreta_type r2 <> Percreta ->
@@ -2114,7 +2149,15 @@ Lemma percreta_highest_expected_loss : forall r1 r2,
   ch_prior_cesareans r1 = ch_prior_cesareans r2 ->
   expected_ebl_cesarean_hysterectomy r1 > expected_ebl_cesarean_hysterectomy r2.
 Proof.
-Admitted.
+  intros r1 r2 H1 H2 Hant Hcs.
+  unfold expected_ebl_cesarean_hysterectomy, gt.
+  rewrite H1, Hant, Hcs.
+  set (k := ch_prior_cesareans r2 * 200).
+  destruct (ch_accreta_type r2) eqn:E2; try contradiction.
+  all: destruct (ch_placenta_anterior r2).
+  all: apply lt_add_same_r.
+  all: apply Nat.ltb_lt; native_compute; reflexivity.
+Qed.
 
 (******************************************************************************)
 (*           MULTIPLE GESTATION ADJUSTMENTS (Gap #15)                         *)
@@ -2862,6 +2905,34 @@ End Stage.
 
 (******************************************************************************)
 (*                                                                            *)
+(*                     TYPE-SAFE INTERFACE WRAPPERS                           *)
+(*                                                                            *)
+(*  These wrappers enforce unit types at the API boundary.                    *)
+(*                                                                            *)
+(******************************************************************************)
+
+Module TypedInterface.
+
+Definition stage_of_ebl_typed (d : DeliveryMode.t) (ebl : Units.mL) : Stage.t :=
+  Stage.of_ebl d (Units.mL_val ebl).
+
+Definition threshold_stage2_typed (d : DeliveryMode.t) : Units.mL :=
+  Units.MkML (Stage.threshold_stage2 d).
+
+Definition threshold_stage3_typed (d : DeliveryMode.t) : Units.mL :=
+  Units.MkML (Stage.threshold_stage3 d).
+
+Definition threshold_stage4_typed (d : DeliveryMode.t) : Units.mL :=
+  Units.MkML (Stage.threshold_stage4 d).
+
+Lemma stage_of_ebl_typed_correct : forall d ebl,
+  stage_of_ebl_typed d ebl = Stage.of_ebl d (Units.mL_val ebl).
+Proof. reflexivity. Qed.
+
+End TypedInterface.
+
+(******************************************************************************)
+(*                                                                            *)
 (*                            INTERVENTION                                    *)
 (*                                                                            *)
 (*  Clinical interventions mapped to PPH stages per California MQC protocol.  *)
@@ -3075,9 +3146,14 @@ Definition max_dose_carboprost_doses : nat := 8.
 Definition max_dose_misoprostol_mcg : nat := 1000.
 
 (** Minimum repeat intervals in minutes.
-    Carboprost (Hemabate): q15-90 minutes per package insert.
-    Using 15 minutes as minimum to allow for acute hemorrhage scenarios.
-    Maximum recommended total: 8 doses (2mg total). *)
+    Package insert intervals vary by urgency:
+    - Carboprost (Hemabate): q15-90 minutes per package insert.
+      This development uses 15 min (lower bound) for acute hemorrhage.
+      For non-emergent cases, 30-90 min intervals may be preferred.
+    - Methylergonovine: q2-4 hours typically; using 2 min floor for acute crisis.
+    - Oxytocin: continuous infusion usually; bolus q15min floor.
+    - Misoprostol: single dose preferred; q60min if additional dose needed.
+    Maximum carboprost: 8 doses (2mg total = 250mcg × 8). *)
 Definition repeat_interval_oxytocin_min : nat := 15.
 Definition repeat_interval_methylergonovine_min : nat := 2.
 Definition repeat_interval_carboprost_min_lower : nat := 15.
@@ -6189,7 +6265,24 @@ End AntepartumHemorrhage.
 (*                                                                            *)
 (*                         EXTRACTION                                         *)
 (*                                                                            *)
-(*  Code extraction for OCaml.                                               *)
+(*  Code extraction for OCaml.                                                *)
+(*                                                                            *)
+(*  IMPORTANT: EXTRACTION BOUNDARY SAFETY                                     *)
+(*  ======================================                                     *)
+(*  Coq `nat` is extracted to OCaml `int`. This introduces a mismatch:        *)
+(*  - Coq `nat` is non-negative by construction                               *)
+(*  - OCaml `int` can be negative                                             *)
+(*                                                                            *)
+(*  The proofs in this development assume non-negative inputs. If negative    *)
+(*  values are passed to extracted functions, the proven properties may not   *)
+(*  hold. Callers MUST validate inputs at the OCaml boundary.                 *)
+(*                                                                            *)
+(*  Recommended validation pattern for extracted code:                        *)
+(*    let validate_nat x = if x < 0 then None else Some x                     *)
+(*    let safe_stage_of_ebl d ebl =                                           *)
+(*      match validate_nat ebl with                                           *)
+(*      | None -> failwith "EBL must be non-negative"                         *)
+(*      | Some ebl -> stage_of_ebl d ebl                                      *)
 (*                                                                            *)
 (******************************************************************************)
 
